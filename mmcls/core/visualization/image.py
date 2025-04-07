@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import mmcv
 import numpy as np
 from matplotlib.backend_bases import CloseEvent
-from matplotlib.blocking_input import BlockingInput
+# from matplotlib.blocking_input import BlockingInput
 
 # A small value
 EPS = 1e-2
@@ -52,7 +52,7 @@ class BaseFigureContextManager:
         self.fig_show: plt.Figure = None
         self.fig_show_cfg = fig_show_cfg
         self.ax_show: plt.Axes = None
-        self.blocking_input: BlockingInput = None
+        # self.blocking_input: BlockingInput = None
 
         self.axis = axis
 
@@ -83,8 +83,8 @@ class BaseFigureContextManager:
         fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
 
         self.fig_show, self.ax_show = fig, ax
-        self.blocking_input = BlockingInput(
-            self.fig_show, eventslist=('key_press_event', 'close_event'))
+        # self.blocking_input = BlockingInput(
+        #     self.fig_show, eventslist=('key_press_event', 'close_event'))
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.is_inline:
@@ -134,8 +134,8 @@ class BaseFigureContextManager:
             timer.start()
         while True:
             # Disable matplotlib default hotkey to close figure.
-            with plt.rc_context({'keymap.quit': []}):
-                key_press = self.blocking_input(n=1, timeout=0)
+            # with plt.rc_context({'keymap.quit': []}):
+            #     key_press = self.blocking_input(n=1, timeout=0)
 
             # Timeout or figure is closed or press space or press 'q'
             if len(key_press) == 0 or isinstance(

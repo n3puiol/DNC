@@ -137,3 +137,6 @@ DNC_classification_save
 *.pth
 *.out
 *.pkl
+
+pretrained
+data

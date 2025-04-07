@@ -29,16 +29,14 @@ We devise deep nearest centroids (DNC), a conceptually elegant yet surprisingly 
 
 ## Installation
 
-For installation and data preparation, please refer to the guidelines in [MMClassification v0.18.0](https://github.com/open-mmlab/mmclassification/tree/v0.18.0) and [MMSegmentation v0.20.2](https://github.com/open-mmlab/mmsegmentation/tree/v0.20.2).
-
-I do my installation on ```CUDA 11.4``` and  ```pytorch 1.8.1``` 
-
-```
-pip install torchvision==0.9.1
-pip install timm==0.3.2
-pip install mmcv-full==1.4.1
-pip install opencv-python==4.5.1.48
-cd DNC_classification && pip install -e . --user
+```bash
+conda create -n open-mmlab python=3.8 -y
+conda activate open-mmlab
+conda install cudatoolkit=11.3.1
+pip install git+https://github.com/open-mmlab/mim.git
+mim install mmcls
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Training
