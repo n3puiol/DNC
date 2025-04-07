@@ -30,11 +30,8 @@ We devise deep nearest centroids (DNC), a conceptually elegant yet surprisingly 
 ## Installation
 
 ```bash
-conda create -n open-mmlab python=3.8 -y
-conda activate open-mmlab
-conda install cudatoolkit=11.3.1
-pip install git+https://github.com/open-mmlab/mim.git
-mim install mmcls
+conda create -n DNC python=3.8 cudatoolkit=11.3.1
+conda activate DNC
 pip install -r requirements.txt
 pip install -e .
 ```
