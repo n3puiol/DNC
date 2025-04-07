@@ -41,6 +41,7 @@ pip install -e .
 Example training command for ResNet50 on CIFAR-100:
 
 ```bash
+export PYTHONPATH="$(dirname $0)/..":$PYTHONPATH
 python -m torch.distributed.launch tools/train.py configs/resnet/resnet50_8xb16_cifar100_centroids.py --launcher pytorch 
 ```
 
