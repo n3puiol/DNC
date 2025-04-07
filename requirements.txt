@@ -1,8 +1,9 @@
 torchvision @ https://download.pytorch.org/whl/cu111/torchvision-0.9.1%2Bcu111-cp38-cp38-linux_x86_64.whl
 torch @ https://download.pytorch.org/whl/cu111/torch-1.8.1%2Bcu111-cp38-cp38-linux_x86_64.whl
 timm==0.3.2
-mmcv-full==1.4.1
- mmcls==0.18.0
+mmcv-full==1.4.2
+mmcls==0.18.0
 opencv-python==4.5.1.48
 matplotlib==3.4.3
- yapf==0.40.1
+yapf==0.40.1
+einops==0.8.1

@@ -105,31 +105,31 @@ venv.bak/
 .mypy_cache/
 
 # custom
-DNC_classification/data
-DNC_classification/Sbatch_files
-DNC_classification/pre_trained
-DNC_classification/ECCV_res_supplementary
-DNC_classification/CVPR_res
-DNC_classification/res
-DNC_classification/classification_save_models
+data
+Sbatch_files
+pre_trained
+ECCV_res_supplementary
+CVPR_res
+res
+classification_save_models
 .vscode
 .idea
 *.pkl
 *.pkl.json
 *.log.json
-DNC_classification/work_dirs
-DNC_classification/mmcls/.mim
-DNC_classification/demo
-DNC_classification/docs
-DNC_classification/model_save
-DNC_classification/wordNet
-DNC_classification/work_dirs
-DNC_classification/CH_CVPR/data
-DNC_classification/CH_CVPR/*.txt
-DNC_classification/CH_ECCV
-# DNC_classification/mmcls
-# DNC_classification/configs
-DNC_classification/docker
+work_dirs
+mmcls/.mim
+demo
+docs
+model_save
+wordNet
+work_dirs
+CH_CVPR/data
+CH_CVPR/*.txt
+CH_ECCV
+# mmcls
+# configs
+docker
 DNC_classification_pre
 DNC_classification_save
 
@@ -139,4 +139,3 @@ DNC_classification_save
 *.pkl
 
 pretrained
-data

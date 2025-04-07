@@ -38,28 +38,22 @@ pip install -e .
 
 ## Training
 
-To train your own model, please apply the following command. Give ResNet50-ImageNet as an example.
+Example training command for ResNet50 on CIFAR-100:
 
-```
-sh ./tools/dist_train.sh configs/resnet/resnet50_8xb32_in1k_centroids.py 8 \
-  --work-dir SCRATCH_DIR 
+```bash
+python -m torch.distributed.launch tools/train.py configs/resnet/resnet50_8xb16_cifar100_centroids.py --launcher pytorch 
 ```
 
-More general case:
-
-```
-sh ./tools/dist_train.sh configs/(resnet/swin_transformer)/xxxxxx.py 8 \
-  --work-dir SCRATCH_DIR
-```
+Change config file to available configs in `configs/` folder.
 
 ## Testing
 
-Download [trained weights](https://drive.google.com/drive/folders/1zCT10t09mXw-8iLqDvkmxR46lOD5dsv4?usp=sharing)
+Download [trained weights](https://drive.google.com/drive/folders/1zCT10t09mXw-8iLqDvkmxR46lOD5dsv4?usp=sharing) and extract to `pretrained/` folder.
 
-```
-# Single-gpu testing
-pip list | grep "mmcv\|mmcls\|^torch"
-python tools/test.py local_config_file.py model.pth --out result.pkl --metrics accuracy
+Example testing command for ResNet50 on CIFAR-100 with pretrained weights in pretrained folder:
+
+```bash
+python tools/test.py pretrained/DNC_ResNet50_CIFAR100/resnet50_4xb32_cifar100_centroids.py pretrained/DNC_ResNet50_CIFAR100/resnet50_cifar100_epoch_200.pth --out result.pkl --metrics accuracy
 ```
 
 
