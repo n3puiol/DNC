@@ -114,8 +114,7 @@ def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
     return B
 
 
-def gumbel_softmax(logits, tau=1, hard=False, eps=1e-10, dim=-1):
-    # type: (Tensor, float, bool, float, int) -> Tensor
+def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10, dim=-1):
     r"""
     Samples from the `Gumbel-Softmax distribution`_ and optionally discretizes.
     You can use this function to replace "F.gumbel_softmax".
@@ -203,9 +202,9 @@ def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
         L_t = (2 ** (j - 1)) * L[k, 0]  # current trial for L
         a_t = (1 + torch.sqrt(1 + 4 * L_t * A[k, 0])) / (
                 2 * L_t)  # trial for calculate a_k as solution of quadratic equation explicitly
-        A_t = A[k, 0] + a_t;  # trial of A_k
-        tau = a_t / A_t;  # trial of \tau_{k}
-        x_t = tau * z[:, k] + (1 - tau) * y[:, k];  # trial for x_k
+        A_t = A[k, 0] + a_t  # trial of A_k
+        tau = a_t / A_t  # trial of \tau_{k}
+        x_t = tau * z[:, k] + (1 - tau) * y[:, k]  # trial for x_k
 
         lamb = x_t[:n, ]
         mu = x_t[n:n + p, ]
@@ -277,7 +276,7 @@ class SubCentroids_Head_Formal(ClsHead):
 
         # 500 for swin-T # ResNet for 1000 # for swin-B 300 # 400 for swin-s #1000 for mobilenet-v2
         self.batch_size_num_limit = 1000
-        print('self.BS_num_limit', self.batch_size_num_limit)
+        print('batch size limit', self.batch_size_num_limit)
 
         if self.num_classes <= 0:
             raise ValueError(
@@ -294,28 +293,27 @@ class SubCentroids_Head_Formal(ClsHead):
             act_cfg=self.act_cfg)]
         self.convs = nn.Sequential(*convs)
 
-        '''set the number of sub-centroids here, 4 for best performance'''
-        # self.num_subcentroids = 4
-        # print('subcentroids_num:', self.num_subcentroids)
-
         # 512 for resnet18, 2048 for resnet50
         # if turn 512, then no dimension expand (2048 for expansion for resnet18)
         # 2048 for imagenet without expanding dimension
         # 1024 for swin transformer without expanding dimension
         embedding_dim = self.in_channels
-        # self.prototypes = nn.Parameter(torch.zeros(self.num_classes, self.num_subcentroids, embedding_dim),
-        #                                requires_grad=self.pretrain_subcentroids)
-        self.dyn_prototypes = nn.ParameterList([nn.Parameter() for _ in range(self.num_classes)])
 
         # Initialize with maximum possible subcentroids
         self.max_subcentroids = 10
         self.candidate_subcentroids = [2, 4, 6, 8, 10]
-        self.optimal_subcentroids = {k: 4 for k in range(num_classes)}  # Default to 4
+        # self.optimal_subcentroids = {k: 4 for k in range(num_classes)}  # Default to 4
+        self.optimal_subcentroids = nn.Parameter(torch.zeros(self.num_classes),
+                                                 requires_grad=False)
+        self.optimal_subcentroids.data.fill_(4)  # Default to 4
         self.prototypes = nn.Parameter(torch.zeros(self.num_classes, self.max_subcentroids, embedding_dim),
                                        requires_grad=self.pretrain_subcentroids)
 
         # Track best silhouette scores
-        self.best_silhouette = {k: -1.0 for k in range(num_classes)}
+        # self.best_silhouette = {k: -1.0 for k in range(num_classes)}
+        self.best_silhouette = nn.Parameter(torch.zeros(self.num_classes),
+                                            requires_grad=False)
+        self.best_silhouette.data.fill_(-1.0)  # Initialize with -1
 
         # CK times embedding_dim
         self.feat_norm = nn.LayerNorm(embedding_dim)
@@ -443,17 +441,18 @@ class SubCentroids_Head_Formal(ClsHead):
 
             optimal_k, score = self.find_optimal_subcentroids(c_k, k)
             if score > self.best_silhouette[k]:
-                self.optimal_subcentroids[k] = optimal_k
-                self.best_silhouette[k] = score
+                self.optimal_subcentroids[k] = torch.tensor(optimal_k)
+                self.best_silhouette[k] = torch.tensor(score)
 
             # Use optimal number of subcentroids for this class
             num_k = self.optimal_subcentroids[k]
+            num_k = int(num_k.item())
 
             # get initial assignments for the k-th class
             init_q = masks[gt_seg == k, :num_k, k]
 
             # clustering
-            q, indexs = agd_torch_no_grad_gpu(init_q)
+            q, indexes = agd_torch_no_grad_gpu(init_q)
 
             m_k = mask[gt_seg == k]
             m_k_tile = repeat(m_k, 'n -> n tile', tile=num_k)
@@ -475,7 +474,7 @@ class SubCentroids_Head_Formal(ClsHead):
                 centroids[k, :num_k][n != 0] = new_value
 
             # Update target indices
-            centroid_target[gt_seg == k] = indexs.float() + (num_k * k)
+            centroid_target[gt_seg == k] = indexes.float() + (num_k * k)
 
         # Update prototypes
         self.prototypes = nn.Parameter(F.normalize(centroids, p=2, dim=-1),
@@ -494,17 +493,17 @@ class SubCentroids_Head_Formal(ClsHead):
 
         batch_size = inputs.shape[0]
 
-        if self.is_only_cross_entropy is True:
+        if self.is_only_cross_entropy:
             # Save to memory bank
-            BS_num = self.dequeue_and_enqueue(inputs, gt_label, batch_size)
+            batch_size_num = self.dequeue_and_enqueue(inputs, gt_label, batch_size)
 
-            if BS_num >= self.batch_size_num_limit:
+            if batch_size_num >= self.batch_size_num_limit:
                 self.is_only_cross_entropy = False
             else:
                 seg_logits = self.forward(inputs, gt_label)
                 losses = self.loss(seg_logits, gt_label)
 
-        if self.pretrain_subcentroids is False and self.use_subcentroids is True and self.is_only_cross_entropy is False:
+        if not self.pretrain_subcentroids and self.use_subcentroids and not self.is_only_cross_entropy:
             # concat data from memory_bank
             inputs = torch.cat(self.memory_bank, 0)
             gt_label = torch.cat(self.memory_bank_label, 0)
@@ -536,10 +535,9 @@ class SubCentroids_Head_Formal(ClsHead):
 
         out_cls = self.mask_norm(out_cls)
 
-        if self.pretrain_subcentroids is False and self.use_subcentroids is True and gt_label is not None and self.is_only_cross_entropy is False:
+        if not self.pretrain_subcentroids and self.use_subcentroids and gt_label is not None and not self.is_only_cross_entropy:
             contrast_logits, contrast_target = self.subcentroids_learning(x, out_cls, gt_label, masks)
             return out_cls, contrast_logits, contrast_target
-
         else:
             return out_cls
 
