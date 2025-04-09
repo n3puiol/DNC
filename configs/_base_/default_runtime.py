@@ -6,6 +6,15 @@ log_config = dict(
     hooks=[
         dict(type='TextLoggerHook'),
         # dict(type='TensorboardLoggerHook')
+        dict(type='WandbLoggerHook',
+             init_kwargs=dict(
+                 project='DNC',
+                 name='DynamicCentroids',
+                 config=dict(
+                     work_dir='${work_dir}'
+                 )
+             ),
+             interval=100)
     ])
 # yapf:enable
 
