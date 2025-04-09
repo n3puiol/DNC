@@ -142,7 +142,7 @@ def test_vit_head():
     # test vit head init_weights
     head = VisionTransformerClsHead(10, 100, hidden_dim=20)
     head.init_weights()
-    assert abs(head.layers.pre_logits.weight).sum() > 0
+    assert abs(pre_logits.weight).sum() > 0
 
     # test simple_test
     head = VisionTransformerClsHead(10, 100, hidden_dim=20)
