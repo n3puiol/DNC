@@ -5,16 +5,16 @@ log_config = dict(
     interval=100,
     hooks=[
         dict(type='TextLoggerHook'),
-        # dict(type='TensorboardLoggerHook')
         dict(type='WandbLoggerHook',
              init_kwargs=dict(
-                 project='DNC',
-                 name='DynamicCentroids',
+                 project='mmcls',
+                 name='default',
                  config=dict(
                      work_dir='${work_dir}'
                  )
              ),
-             interval=100)
+             interval=100,
+             log_artifact=True)
     ])
 # yapf:enable
 
