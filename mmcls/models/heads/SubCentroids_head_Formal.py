@@ -1,22 +1,31 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from sklearn.metrics import silhouette_score
-
 from ..builder import HEADS
 from .cls_head import ClsHead
 import torch.distributed as dist
-from mmcv.cnn import ConvModule
+from mmcv.runner import auto_fp16, force_fp32
+from mmcv.cnn import ConvModule, DepthwiseSeparableConvModule
 import numpy as np
-from einops import repeat
+import os
+import pickle
+
+from ..losses import accuracy
+from einops import rearrange, repeat
 from timm.models.layers import trunc_normal_
+
+from collections import deque
+import random
+import sys
 
 
 @torch.no_grad()
 def distributed_sinkhorn(out, sinkhorn_iterations=3, epsilon=0.05):  # skinhorn iteration time=3
-    # epsilon: convergence parameter
+    # epsilon: convergence paramter
+
     Q = torch.exp(out / epsilon).t()  # K x B
     B = Q.shape[1]
     K = Q.shape[0]  # how many sub-centriods
@@ -45,28 +54,57 @@ def distributed_sinkhorn(out, sinkhorn_iterations=3, epsilon=0.05):  # skinhorn 
 
 # handle exceptions
 @torch.no_grad()
-def approx_ot(M, max_iter=10):
+def approx_ot(M, stop_thrs=0.05, numItermax=10):
+    # r = np.asarray(r, dtype=np.float64)
+    # c = np.asarray(c, dtype=np.float64)
     M = M.t()  # [#Guass, K]
     p = M.shape[0]  # #Guass
     n = M.shape[1]  # K
 
+    '''new-added'''
+
     r = torch.ones((p,), dtype=torch.float64).to(M.device) / p  # .to(L.device) / K
     c = torch.ones((n,), dtype=torch.float64).to(M.device) / n  # .to(L.device) / B 先不要 等会加上
 
-    B = sinkhorn_knopp(r, c, M, reg=0.05, max_iter=max_iter)
+    # M = np.asarray(M, dtype=np.float64)
+
+    # if len(r) == 0:
+    # 	r = np.ones((M.shape[0],), dtype=np.float64) / M.shape[0]
+    # if len(c) == 0:
+    # 	c = np.ones((M.shape[1],), dtype=np.float64) / M.shape[1]
+
+    # init data
+    dim_r = len(r)
+    dim_c = len(c)
+
+    # n = r.shape[0]
+    # reg = stop_thrs/(4*math.log(dim_r))
+    stop_thrs_new = stop_thrs / (8 * torch.linalg.norm(M, ord=float('inf')))  # np.max(M)
+
+    # probably just r and c here (no: r,c should be slightly smaller)
+    r_new = (1 - stop_thrs_new / 8) * (
+                r + (stop_thrs_new / (dim_r * (8 - stop_thrs_new))) * torch.ones(r.shape, dtype=torch.float64).cuda())
+    c_new = (1 - stop_thrs_new / 8) * (
+                c + (stop_thrs_new / (dim_c * (8 - stop_thrs_new))) * torch.ones(c.shape, dtype=torch.float64).cuda())
+
+    B = sinkhorn_knopp(r, c, M, reg=0.05, numItermax=numItermax)
 
     B = B.t()
 
-    indexes = torch.argmax(B, dim=1)
+    indexs = torch.argmax(B, dim=1)
+    # G = F.gumbel_softmax(B, tau=0.5, hard=True)
     G = gumbel_softmax(B, tau=0.5, hard=True)
+    # print('indexs', indexs)
+    # print('G', G)
+    # print(torch.isnan(G).int().sum())
     if torch.isnan(G).int().sum() > 0:
         print('output has nan, use self_gambel_softmax')
 
-    return G.to(torch.float32), indexes
+    return G.to(torch.float32), indexs
 
 
 @torch.no_grad()
-def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
+def sinkhorn_knopp(a, b, M, reg=0.05, numItermax=10):
     if len(a) == 0:
         print('ERROR-- should have a value as input')
         a = torch.ones((M.shape[0],), dtype=torch.float64) / M.shape[0]
@@ -82,23 +120,44 @@ def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
                     dtype=torch.float64).cuda()  # / dim_a; #u = np.log(u) # log to match linear-scale sinkhorn initializations
     v = torch.zeros(dim_b, dtype=torch.float64).cuda()  # / dim_b; #v = np.log(v)
 
+    # print(reg)
+
+    # Next 3 lines equivalent to K= np.exp(-M/reg), but faster to compute
+    # K = torch.empty(M.shape, dtype=M.dtype).cuda()
+    # torch.divide(M, -reg, out=K)
+    # K = M/-reg
+    # torch.exp(K, out=K)
+
     K = torch.exp(-M / reg).cuda()
+    # print('exp(u):',torch.exp(u)) #inf
+    # print('exp(v)', torch.exp(v))
+
+    # print(np.exp(u).shape, np.exp(v).shape, K.shape)
     B = torch.einsum('i,ij,j->ij', torch.exp(u), K, torch.exp(v)).cuda()
     ones_a = torch.ones((dim_a,), dtype=torch.float64).cuda()
     ones_b = torch.ones((dim_b,), dtype=torch.float64).cuda()
 
     cpt = 0
 
-    for _ in range(max_iter):
-        u_prev = u
-        v_prev = v
+    for _ in range(numItermax):
+        uprev = u
+        vprev = v
 
+        # KtransposeU = np.dot(K.T, u)
+        # v = np.divide(b, KtransposeU)
+        # u = 1. / np.dot(Kp, v)
+
+        # B = np.einsum('i,ij,j->ij', np.exp(uprev), K, np.exp(vprev))
         if cpt % 2 == 0:
-            u = u_prev + torch.log(a) - torch.log(torch.matmul(ones_b, B.T) + 1e-6)  # transpose-row
-            v = v_prev
+            u = uprev + torch.log(a) - torch.log(torch.matmul(ones_b, B.T) + 1e-6)  # transpose-row
+            v = vprev
         else:
-            v = v_prev + torch.log(b) - torch.log(torch.matmul(ones_a, B) + 1e-6)
-            u = u_prev
+            v = vprev + torch.log(b) - torch.log(torch.matmul(ones_a, B) + 1e-6)
+            u = uprev
+        # print(np.exp(u).shape, np.exp(v).shape, K.shape)
+        # print('u', torch.exp(u))
+        # print('v', torch.exp(v))
+        # print('K', K)
         B = torch.einsum('i,ij,j->ij', torch.exp(u), K, torch.exp(v))
 
         if (torch.any(torch.isnan(u)) or torch.any(torch.isinf(u))
@@ -106,15 +165,17 @@ def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
                 or torch.any(torch.isnan(B)) or torch.any(torch.isinf(B))):
             # we have reached the machine precision #np.any(KtransposeU == 0)
             # come back to previous solution and quit loop
-            u = u_prev
-            v = v_prev
+            u = uprev
+            v = vprev
             B = torch.einsum('i,ij,j->ij', torch.exp(u), K, torch.exp(v))
             break
         cpt = cpt + 1
+
     return B
 
 
-def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10, dim=-1):
+def gumbel_softmax(logits, tau=1, hard=False, eps=1e-10, dim=-1):
+    # type: (Tensor, float, bool, float, int) -> Tensor
     r"""
     Samples from the `Gumbel-Softmax distribution`_ and optionally discretizes.
     You can use this function to replace "F.gumbel_softmax".
@@ -173,7 +234,7 @@ def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10, dim=-1):
 
 # K * #Guass as input
 @torch.no_grad()
-def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
+def AGD_torch_no_grad_gpu(M, maxIter=20, eps=0.05):
     M = M.t()  # [#Guass, K]
     p = M.shape[0]  # #Guass
     n = M.shape[1]  # K
@@ -183,28 +244,29 @@ def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
     r = torch.ones((p,), dtype=torch.float64).to(M.device) / p  # .to(L.device) / K
     c = torch.ones((n,), dtype=torch.float64).to(M.device) / n  # .to(L.device) / B 先不要 等会加上
 
+    max_el = torch.max(abs(M))  # np.linalg.norm(M, ord=np.inf)
     gamma = eps / (3 * math.log(n))
 
-    A = torch.zeros((max_iter, 1), dtype=torch.float64).to(M.device)  # init array of A_k
-    L = torch.zeros((max_iter, 1), dtype=torch.float64).to(M.device)  # init array of L_k
+    A = torch.zeros((maxIter, 1), dtype=torch.float64).to(M.device)  # init array of A_k
+    L = torch.zeros((maxIter, 1), dtype=torch.float64).to(M.device)  # init array of L_k
 
     # set initial values for APDAGD
-    L[0, 0] = 1  # set L_0
+    L[0, 0] = 1;  # set L_0
 
     # set starting point for APDAGD
-    y = torch.zeros((n + p, max_iter),
+    y = torch.zeros((n + p, maxIter),
                     dtype=torch.float64).cuda()  # init array of points y_k for which usually the convergence rate is proved (eta)
-    z = torch.zeros((n + p, max_iter),
+    z = torch.zeros((n + p, maxIter),
                     dtype=torch.float64).cuda()  # init array of points z_k. this is the Mirror Descent sequence. (zeta)
     j = 0
     # main cycle of APDAGD
-    for k in range(0, (max_iter - 1)):
+    for k in range(0, (maxIter - 1)):
         L_t = (2 ** (j - 1)) * L[k, 0]  # current trial for L
         a_t = (1 + torch.sqrt(1 + 4 * L_t * A[k, 0])) / (
-                2 * L_t)  # trial for calculate a_k as solution of quadratic equation explicitly
-        A_t = A[k, 0] + a_t  # trial of A_k
-        tau = a_t / A_t  # trial of \tau_{k}
-        x_t = tau * z[:, k] + (1 - tau) * y[:, k]  # trial for x_k
+                    2 * L_t)  # trial for calculate a_k as solution of quadratic equation explicitly
+        A_t = A[k, 0] + a_t;  # trial of A_k
+        tau = a_t / A_t;  # trial of \tau_{k}
+        x_t = tau * z[:, k] + (1 - tau) * y[:, k];  # trial for x_k
 
         lamb = x_t[:n, ]
         mu = x_t[n:n + p, ]
@@ -221,7 +283,21 @@ def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
         grad_psi_x_t[:p, ] = r - torch.sum(X_lamb, axis=1)
         grad_psi_x_t[p:p + n, ] = c - torch.sum(X_lamb, axis=0).T
 
+        # update model trial
+        z_t = z[:, k] - a_t * grad_psi_x_t  # trial of z_k
+        y_t = tau * z_t + (1 - tau) * y[:, k]  # trial of y_k
+
+        # calculate function \psi(\lambda,\mu) value and gradient at the trial point of y_{k}
+        lamb = y_t[:n, ]
+        mu = y_t[n:n + p, ]
+        M_new = -M - torch.matmul(lamb.reshape(-1, 1).cuda(),
+                                  torch.ones((1, p), dtype=torch.float64).cuda()).T - torch.matmul(
+            torch.ones((n, 1), dtype=torch.float64).cuda(), mu.reshape(-1, 1).T.cuda()).T
+        Z = torch.exp(M_new / gamma)
+        sum_Z = torch.sum(Z)
+
         X = tau * X_lamb + (1 - tau) * X  # set primal variable
+        # break
 
         L[k + 1, 0] = L_t
         j += 1
@@ -269,51 +345,44 @@ class SubCentroids_Head_Formal(ClsHead):
         self.centroid_contrast_loss_weights = 0.005
         self.in_channels = in_channels
         self.num_classes = num_classes
-
-        self.is_only_cross_entropy = True
+        self.expand_dim = False
+        ####### memory_bank added #######
+        self.isOnlyCE = True
         self.memory_bank = []
         self.memory_bank_label = []
 
         # 500 for swin-T # ResNet for 1000 # for swin-B 300 # 400 for swin-s #1000 for mobilenet-v2
-        self.batch_size_num_limit = 1000
-        print('batch size limit', self.batch_size_num_limit)
+        self.BS_num_limit = 1000
+        print('self.BS_num_limit', self.BS_num_limit)
 
         if self.num_classes <= 0:
             raise ValueError(
                 f'num_classes={num_classes} must be a positive integer')
 
-        convs = [ConvModule(
-            512,
-            512,  # 2048
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            conv_cfg=self.conv_cfg,
-            norm_cfg=self.norm_cfg,
-            act_cfg=self.act_cfg)]
+        convs = []
+        convs.append(
+            ConvModule(
+                512,
+                512,  # 2048
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                conv_cfg=self.conv_cfg,
+                norm_cfg=self.norm_cfg,
+                act_cfg=self.act_cfg))
         self.convs = nn.Sequential(*convs)
+
+        '''set the number of sub-centroids here, 4 for best performance'''
+        self.num_subcentroids = 4
+        print('subcentroids_num:', self.num_subcentroids)
 
         # 512 for resnet18, 2048 for resnet50
         # if turn 512, then no dimension expand (2048 for expansion for resnet18)
         # 2048 for imagenet without expanding dimension
         # 1024 for swin transformer without expanding dimension
         embedding_dim = self.in_channels
-
-        # Initialize with maximum possible subcentroids
-        self.max_subcentroids = 10
-        self.candidate_subcentroids = [2, 4, 6, 8, 10]
-        # self.optimal_subcentroids = {k: 4 for k in range(num_classes)}  # Default to 4
-        self.optimal_subcentroids = nn.Parameter(torch.zeros(self.num_classes),
-                                                 requires_grad=False)
-        self.optimal_subcentroids.data.fill_(4)  # Default to 4
-        self.prototypes = nn.Parameter(torch.zeros(self.num_classes, self.max_subcentroids, embedding_dim),
+        self.prototypes = nn.Parameter(torch.zeros(self.num_classes, self.num_subcentroids, embedding_dim),
                                        requires_grad=self.pretrain_subcentroids)
-
-        # Track best silhouette scores
-        # self.best_silhouette = {k: -1.0 for k in range(num_classes)}
-        self.best_silhouette = nn.Parameter(torch.zeros(self.num_classes),
-                                            requires_grad=False)
-        self.best_silhouette.data.fill_(-1.0)  # Initialize with -1
 
         # CK times embedding_dim
         self.feat_norm = nn.LayerNorm(embedding_dim)
@@ -347,6 +416,7 @@ class SubCentroids_Head_Formal(ClsHead):
                 - If post processing, the output is a multi-dimentional list of
                   float and the dimensions are ``(num_samples, num_classes)``.
         """
+
         x = self.pre_logits(x)
         cls_score = self.forward(x)
 
@@ -370,61 +440,17 @@ class SubCentroids_Head_Formal(ClsHead):
                 torch.norm(update, p=2)))
         return update
 
-    @staticmethod
-    def compute_silhouette(features, cluster_labels):
-        """Compute silhouette score for clustering evaluation.
-
-        Args:
-            features (torch.Tensor): Feature embeddings (N x D)
-            cluster_labels (torch.Tensor): Cluster assignments (N,)
-        Returns:
-            float: Silhouette score between -1 and 1
-        """
-        # Convert to numpy for sklearn
-        features_np = features.detach().cpu().numpy()
-        labels_np = cluster_labels.detach().cpu().numpy()
-
-        # Compute silhouette score if we have at least 2 clusters with data
-        unique_labels = np.unique(labels_np)
-        if len(unique_labels) > 1:
-            score = silhouette_score(features_np, labels_np, metric='cosine')
-            return score
-        return 0.0
-
-    def find_optimal_subcentroids(self, features, class_idx):
-        """Find optimal number of subcentroids based on silhouette score.
-
-        Args:
-            features (torch.Tensor): Feature embeddings for one class
-            class_idx (int): Class index
-        Returns:
-            int: Optimal number of subcentroids
-            float: Best silhouette score
-        """
-        best_score = -1
-        best_k = 4  # Default value
-
-        # Only proceed if we have enough samples
-        if features.shape[0] > max(self.candidate_subcentroids):
-            for k in self.candidate_subcentroids:
-                # Try clustering with k subcentroids
-                init_q = torch.mm(features, self.prototypes[class_idx, :k, :].t())
-                q, indexs = agd_torch_no_grad_gpu(init_q)
-
-                # Compute silhouette score
-                score = self.compute_silhouette(features, indexs)
-
-                if score > best_score:
-                    best_score = score
-                    best_k = k
-        return best_k, best_score
+    def l2_normalize(self, x):
+        return F.normalize(x, p=2, dim=-1)
 
     def subcentroids_learning(self, _c, out_seg, gt_seg, masks):
+        # find pixels that are correctly classified
         pred_seg = torch.max(out_seg, 1)[1]
+
         mask = (gt_seg == pred_seg.view(-1))
 
-        # compute cosine similarity using all subcentroids
-        cosine_similarity = torch.mm(_c, self.prototypes.view(-1, self.prototypes.shape[-1]).t())
+        # compute cosine similarity
+        cosine_similarity = torch.mm(_c, self.prototypes.view(-1, self.prototypes.shape[-1]).t())  # .cpu() # .cpu() ##
 
         # compute logits and apply temperature
         centroid_logits = cosine_similarity / self.temperature
@@ -432,56 +458,59 @@ class SubCentroids_Head_Formal(ClsHead):
 
         # clustering for each class
         centroids = self.prototypes.data.clone()
-
         for k in range(self.num_classes):
-            # Get features for this class
-            c_k = _c[gt_seg == k, ...]
-            if c_k.shape[0] == 0:
+            # get initial assignments for the k-th class
+            init_q = masks[..., k]
+            init_q = init_q[gt_seg == k, ...]
+            if init_q.shape[0] == 0:
                 continue
 
-            optimal_k, score = self.find_optimal_subcentroids(c_k, k)
-            if score > self.best_silhouette[k]:
-                self.optimal_subcentroids[k] = torch.tensor(optimal_k)
-                self.best_silhouette[k] = torch.tensor(score)
+            # clustering q.shape = n x self.num_subcentroids
+            # q, indexs = distributed_sinkhorn(init_q) ##
+            q, indexs = AGD_torch_no_grad_gpu(init_q)
 
-            # Use optimal number of subcentroids for this class
-            num_k = self.optimal_subcentroids[k]
-            num_k = int(num_k.item())
-
-            # get initial assignments for the k-th class
-            init_q = masks[gt_seg == k, :num_k, k]
-
-            # clustering
-            q, indexes = agd_torch_no_grad_gpu(init_q)
-
+            # binary mask for pixels of the k-th class
+            # (1: correctly classified, 0: incorrectly classified)
             m_k = mask[gt_seg == k]
-            m_k_tile = repeat(m_k, 'n -> n tile', tile=num_k)
-            m_q = q * m_k_tile
 
+            # feature embedding for pixels of the k-th class
+            c_k = _c[gt_seg == k, ...]
+
+            # tile m_k to have the same shape as q
+            m_k_tile = repeat(m_k, 'n -> n tile', tile=self.num_subcentroids)  # n x self.num_subcentroids
+
+            # find pixels that are assigned to each subcentroids as well as correctly classified
+            # element-wise dimension doesn't change as m_k_tile
+            m_q = q * m_k_tile  # n x self.num_subcentroids 
+
+            # tile m_k to have the same shape as c_k
             c_k_tile = repeat(m_k, 'n -> n tile', tile=c_k.shape[-1])
-            c_q = c_k * c_k_tile
 
-            f = m_q.transpose(0, 1) @ c_q
+            # find pixels with label k that are correctly classified
+            c_q = c_k * c_k_tile  # n x embedding_dim # c_k and c_k_tile same dimension
+
+            # summarize feature embeddings # matrix multi
+            f = m_q.transpose(0, 1) @ c_q  # self.num_subcentroids x embedding_dim
+
+            # num assignments for each subcentroids
             n = torch.sum(m_q, dim=0)
 
-            if torch.sum(n) > 0 and self.update_subcentroids:
+            if torch.sum(n) > 0 and self.update_subcentroids is True:
+                # normalize embeddings
                 f = F.normalize(f, p=2, dim=-1)
-                new_value = self.momentum_update(
-                    old_value=centroids[k, :num_k][n != 0],
-                    new_value=f[n != 0],
-                    momentum=self.gamma
-                )
-                centroids[k, :num_k][n != 0] = new_value
 
-            # Update target indices
-            centroid_target[gt_seg == k] = indexes.float() + (num_k * k)
+                # update subcentroids (equation 14) # all in k loop therefore specific [n!=0, :]
+                new_value = self.momentum_update(old_value=centroids[k, n != 0, :], new_value=f[n != 0, :],
+                                                 momentum=self.gamma, debug=False)
+                centroids[k, n != 0, :] = new_value  # for every k, update once
 
-        # Update prototypes
+            centroid_target[gt_seg == k] = indexs.float() + (self.num_subcentroids * k)
+
         self.prototypes = nn.Parameter(F.normalize(centroids, p=2, dim=-1),
                                        requires_grad=self.pretrain_subcentroids)
 
-        # Sync across GPUs
-        if self.use_subcentroids and dist.is_available() and dist.is_initialized():
+        # sync across gpus
+        if self.use_subcentroids is True and dist.is_available() and dist.is_initialized():
             centroids = self.prototypes.data.clone()
             dist.all_reduce(centroids.div_(dist.get_world_size()))
             self.prototypes = nn.Parameter(centroids, requires_grad=self.pretrain_subcentroids)
@@ -489,69 +518,79 @@ class SubCentroids_Head_Formal(ClsHead):
         return centroid_logits, centroid_target
 
     def forward_train(self, x, gt_label, **kwargs):
+
+        '''for subcentroids training, this this'''
         inputs = self.pre_logits(x)  # (batch_size x 512)
 
         batch_size = inputs.shape[0]
 
-        if self.is_only_cross_entropy:
+        if self.isOnlyCE is True:
             # Save to memory bank
-            batch_size_num = self.dequeue_and_enqueue(inputs, gt_label, batch_size)
+            BS_num = self.dequeue_and_enqueue(inputs, gt_label, batch_size)
 
-            if batch_size_num >= self.batch_size_num_limit:
-                self.is_only_cross_entropy = False
+            if BS_num >= self.BS_num_limit:
+                # print("BS_num:", BS_num)
+                self.isOnlyCE = False
             else:
                 seg_logits = self.forward(inputs, gt_label)
                 losses = self.loss(seg_logits, gt_label)
 
-        if not self.pretrain_subcentroids and self.use_subcentroids and not self.is_only_cross_entropy:
+        if self.pretrain_subcentroids is False and self.use_subcentroids is True and self.isOnlyCE is False:
+
             # concat data from memory_bank
             inputs = torch.cat(self.memory_bank, 0)
             gt_label = torch.cat(self.memory_bank_label, 0)
 
             seg_logits, contrast_logits, contrast_target = self.forward(inputs, gt_label=gt_label)
+            # seg_logits.shape=batch_size x 10  gt_label.shape=batch_size
             losses = self.loss(seg_logits, gt_label, **kwargs)
 
             # release memory bank space
             self.memory_bank = []
             self.memory_bank_label = []
 
-            if self.centroid_contrast_loss is True and self.is_only_cross_entropy is False:  # changes here: and self.isOnlyCE is False: # Only happens apply once.
+            if self.centroid_contrast_loss is True and self.isOnlyCE is False:  # changes here: and self.isOnlyCE is False: # Only happens apply once.
                 loss_centroid_contrast = F.cross_entropy(contrast_logits, contrast_target.long(), ignore_index=255)
                 losses['loss_centroid_contrast'] = loss_centroid_contrast * self.centroid_contrast_loss_weights
 
             # initialize isOnlyCE to True
-            self.is_only_cross_entropy = True
+            self.isOnlyCE = True
         return losses
 
     def forward(self, x, img_metas=None, gt_label=None):
+        """Forward function for both train and test."""
+        # get higher dimension if comment out, no dimension expanded
+        if self.expand_dim:
+            x = torch.unsqueeze(x, 2)
+            x = torch.unsqueeze(x, 3)
+            x = self.convs(x)
+            x = torch.squeeze(x, 3)
+            x = torch.squeeze(x, 2)
+
+        # print("x_shape", x.shape)
         x = self.feat_norm(x)
-        x = F.normalize(x, p=2, dim=-1)
+        x = self.l2_normalize(x)
 
-        self.prototypes.data.copy_(F.normalize(self.prototypes, p=2, dim=-1))
+        # should add x here.
 
-        # Create mask for optimal subcentroids
-        optimal_mask = torch.zeros_like(self.prototypes)
-        for k in range(self.num_classes):
-            num_k = int(self.optimal_subcentroids[k].item())
-            optimal_mask[k, :num_k, :] = 1.0
+        self.prototypes.data.copy_(self.l2_normalize(self.prototypes))
 
-        # Apply mask to prototypes
-        masked_prototypes = self.prototypes * optimal_mask
-
-        # Compute masks using masked prototypes
-        masks = torch.einsum('nd,kmd->nmk', x, masked_prototypes)  # originally nmk
+        # n: h*w, k: num_class, m: num_subcentroids # n should turn into (# batch* batch_size)
+        masks = torch.einsum('nd,kmd->nmk', x, self.prototypes)  # originally nmk
 
         out_cls = torch.amax(masks, dim=1)
 
         out_cls = self.mask_norm(out_cls)
 
-        if not self.pretrain_subcentroids and self.use_subcentroids and gt_label is not None and not self.is_only_cross_entropy:
+        if self.pretrain_subcentroids is False and self.use_subcentroids is True and gt_label is not None and self.isOnlyCE is False:
             contrast_logits, contrast_target = self.subcentroids_learning(x, out_cls, gt_label, masks)
             return out_cls, contrast_logits, contrast_target
+
         else:
             return out_cls
 
     def dequeue_and_enqueue(self, inputs, gt_label, batch_size):
+
         inputs_all = concat_all_gather(inputs)
         label_all = concat_all_gather(gt_label)
 
@@ -577,7 +616,11 @@ def concat_all_gather(tensor):
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
     """
+    # rank = int(os.environ.get('OMPI_COMM_WORLD_RANK', '0'))
     tensors_gather = [torch.ones_like(tensor) for _ in range(torch.distributed.get_world_size())]
+
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+    # tensors_gather[rank] = tensor
     output = torch.cat(tensors_gather, dim=0)
+
     return output
