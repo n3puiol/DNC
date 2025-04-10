@@ -7,14 +7,13 @@ log_config = dict(
         dict(type='TextLoggerHook'),
         dict(type='WandbLoggerHook',
              init_kwargs=dict(
-                 project='mmcls',
-                 name='default',
+                 project='DNC',
+                 name='Dynamic_SubCentroids_Mask_CIFAR100',
                  config=dict(
                      work_dir='${work_dir}'
                  )
              ),
-             interval=100,
-             log_artifact=True)
+             interval=100)
     ])
 # yapf:enable
 
