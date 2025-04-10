@@ -529,7 +529,17 @@ class SubCentroids_Head_Formal(ClsHead):
 
         self.prototypes.data.copy_(F.normalize(self.prototypes, p=2, dim=-1))
 
-        masks = torch.einsum('nd,kmd->nmk', x, self.prototypes)  # originally nmk
+        # Create mask for optimal subcentroids
+        optimal_mask = torch.zeros_like(self.prototypes)
+        for k in range(self.num_classes):
+            num_k = int(self.optimal_subcentroids[k].item())
+            optimal_mask[k, :num_k, :] = 1.0
+
+        # Apply mask to prototypes
+        masked_prototypes = self.prototypes * optimal_mask
+
+        # Compute masks using masked prototypes
+        masks = torch.einsum('nd,kmd->nmk', x, masked_prototypes)  # originally nmk
 
         out_cls = torch.amax(masks, dim=1)
 
