@@ -67,6 +67,8 @@ def approx_ot(M, max_iter=10):
 
 @torch.no_grad()
 def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     if len(a) == 0:
         print('ERROR-- should have a value as input')
         a = torch.ones((M.shape[0],), dtype=torch.float64) / M.shape[0]
@@ -79,13 +81,13 @@ def sinkhorn_knopp(a, b, M, reg=0.05, max_iter=10):
     dim_b = len(b)
 
     u = torch.zeros(dim_a,
-                    dtype=torch.float64).cuda()  # / dim_a; #u = np.log(u) # log to match linear-scale sinkhorn initializations
-    v = torch.zeros(dim_b, dtype=torch.float64).cuda()  # / dim_b; #v = np.log(v)
+                    dtype=torch.float64).to(device)  # / dim_a; #u = np.log(u) # log to match linear-scale sinkhorn initializations
+    v = torch.zeros(dim_b, dtype=torch.float64).to(device)  # / dim_b; #v = np.log(v)
 
-    K = torch.exp(-M / reg).cuda()
-    B = torch.einsum('i,ij,j->ij', torch.exp(u), K, torch.exp(v)).cuda()
-    ones_a = torch.ones((dim_a,), dtype=torch.float64).cuda()
-    ones_b = torch.ones((dim_b,), dtype=torch.float64).cuda()
+    K = torch.exp(-M / reg).to(device)
+    B = torch.einsum('i,ij,j->ij', torch.exp(u), K, torch.exp(v)).to(device)
+    ones_a = torch.ones((dim_a,), dtype=torch.float64).to(device)
+    ones_b = torch.ones((dim_b,), dtype=torch.float64).to(device)
 
     cpt = 0
 
@@ -174,11 +176,13 @@ def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10, dim=-1):
 # K * #Guass as input
 @torch.no_grad()
 def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     M = M.t()  # [#Guass, K]
     p = M.shape[0]  # #Guass
     n = M.shape[1]  # K
 
-    X = torch.zeros((p, n), dtype=torch.float64).cuda()
+    X = torch.zeros((p, n), dtype=torch.float64).to(device)
 
     r = torch.ones((p,), dtype=torch.float64).to(M.device) / p  # .to(L.device) / K
     c = torch.ones((n,), dtype=torch.float64).to(M.device) / n  # .to(L.device) / B 先不要 等会加上
@@ -193,9 +197,9 @@ def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
 
     # set starting point for APDAGD
     y = torch.zeros((n + p, max_iter),
-                    dtype=torch.float64).cuda()  # init array of points y_k for which usually the convergence rate is proved (eta)
+                    dtype=torch.float64).to(device)  # init array of points y_k for which usually the convergence rate is proved (eta)
     z = torch.zeros((n + p, max_iter),
-                    dtype=torch.float64).cuda()  # init array of points z_k. this is the Mirror Descent sequence. (zeta)
+                    dtype=torch.float64).to(device)  # init array of points z_k. this is the Mirror Descent sequence. (zeta)
     j = 0
     # main cycle of APDAGD
     for k in range(0, (max_iter - 1)):
@@ -210,14 +214,14 @@ def agd_torch_no_grad_gpu(M, max_iter=20, eps=0.05):
         mu = x_t[n:n + p, ]
 
         # 1) [K,1] * [1, #Gauss] --> [K, #Gauss].T -->[#Gauss, K]; 2) [K, 1] * [#Guass, 1].T --> [K, #Guass]--.T--> [#Guass, K]
-        M_new = -M - torch.matmul(lamb.reshape(-1, 1).cuda(),
-                                  torch.ones((1, p), dtype=torch.float64).cuda()).T - torch.matmul(
-            torch.ones((n, 1), dtype=torch.float64).cuda(), mu.reshape(-1, 1).T.cuda()).T
+        M_new = -M - torch.matmul(lamb.reshape(-1, 1).to(device),
+                                  torch.ones((1, p), dtype=torch.float64).to(device)).T - torch.matmul(
+            torch.ones((n, 1), dtype=torch.float64).to(device), mu.reshape(-1, 1).T.to(device)).T
 
         X_lamb = torch.exp(M_new / gamma)
         sum_X = torch.sum(X_lamb)
         X_lamb = X_lamb / sum_X
-        grad_psi_x_t = torch.zeros((n + p,), dtype=torch.float64).cuda()
+        grad_psi_x_t = torch.zeros((n + p,), dtype=torch.float64).to(device)
         grad_psi_x_t[:p, ] = r - torch.sum(X_lamb, axis=1)
         grad_psi_x_t[p:p + n, ] = c - torch.sum(X_lamb, axis=0).T
 
