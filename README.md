@@ -29,11 +29,27 @@ We devise deep nearest centroids (DNC), a conceptually elegant yet surprisingly 
 
 ## Installation
 
+This project requires the use of an NVIDIA GPU and CUDA>=11.3.1.
+
 ```bash
 conda create -n DNC python=3.8 cudatoolkit=11.3.1
 conda activate DNC
 pip install -r requirements.txt
 pip install -e .
+```
+
+## WanDB
+
+We use [WanDB](https://wandb.ai/) for tracking runs. To setup WanDB, you must have an account and login to WanDB:
+
+```bash
+wandb login
+```
+
+To disable it:
+
+```bash
+wandb offline
 ```
 
 ## Training
@@ -49,7 +65,10 @@ Change config file to available configs in `configs/` folder.
 
 ## Testing
 
-Download [trained weights](https://drive.google.com/drive/folders/1zCT10t09mXw-8iLqDvkmxR46lOD5dsv4?usp=sharing) and extract to `pretrained/` folder.
+Download trained weights and extract to `pretrained/` folder.
+
+[Authors trained weights](https://drive.google.com/drive/folders/1zCT10t09mXw-8iLqDvkmxR46lOD5dsv4?usp=sharing)
+[Our trained weights]()
 
 Example testing command for ResNet50 on CIFAR-100 with pretrained weights in pretrained folder:
 
