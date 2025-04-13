@@ -52,6 +52,11 @@ To disable it:
 wandb offline
 ```
 
+## Available configurations
+
+Each branch of the project represent different implementation changes, such as masking.
+
+
 ## Training
 
 Example training command for ResNet50 on CIFAR-100:
