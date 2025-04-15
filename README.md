@@ -27,6 +27,11 @@ We use [MMClassification v0.18.0](https://github.com/open-mmlab/mmclassification
 We devise deep nearest centroids (DNC), a conceptually elegant yet surprisingly effective network for large-scale visual recognition, by revisiting Nearest Centroids, one of the most classic and simple classifiers. Current deep models learn the classifier in a fully parametric manner, ignoring the latent data structure and lacking simplicity and explainability. DNC instead conducts nonparametric, case-based reasoning; it utilizes sub-centroids of training samples to describe class distributions and clearly explains the classification as the proximity of test data and the class sub-centroids in the feature space. Due to the distance-based nature, the network output dimensionality is flexible, and all the learnable parameters are only for data embedding. That means all the knowledge learnt for ImageNet classification can be completely transferred for pixel recognition learning, under the ‘pre-training and fine-tuning’ paradigm. Apart from its nested simplicity and intuitive decision-making mechanism, DNC can even possess ad-hoc explainability when the sub-centroids are selected as actual training images that humans can view and inspect. Compared with parametric counterparts, DNC performs better on image classification (CIFAR-10, ImageNet) and greatly boots pixel recognition (ADE20K, Cityscapes), with improved transparency and fewer learnable parameters, using various network architectures (ResNet, Swin) and segmentation models (FCN, DeepLabV3, Swin). We feel this work brings fundamental insights into related fields.
 
 
+## Changes
+
+This fork implements a dynamic K approach during the subcentroid learning phase.
+
+
 ## Installation
 
 This project requires the use of an NVIDIA GPU and CUDA>=11.3.1.
@@ -73,7 +78,7 @@ Change config file to available configs in `configs/` folder.
 Download trained weights and extract to `pretrained/` folder.
 
 [Authors trained weights](https://drive.google.com/drive/folders/1zCT10t09mXw-8iLqDvkmxR46lOD5dsv4?usp=sharing)
-[Our trained weights]()
+[Our trained weights](https://drive.google.com/drive/folders/1WqwRR4opmKWhceAsqfA_IVh7Y6clS-QR?usp=sharing)
 
 Example testing command for ResNet50 on CIFAR-100 with pretrained weights in pretrained folder:
 
